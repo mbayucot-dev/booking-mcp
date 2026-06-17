@@ -1,0 +1,41 @@
+# Fully standalone stack: Postgres + a one-shot schema/seed + the MCP server
+# over HTTP. `docker compose up` and the server is live with demo data — no
+# booking-agent required.
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: booking
+      POSTGRES_PASSWORD: booking
+      POSTGRES_DB: booking
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U booking"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  seed:
+    build: .
+    command: ["python", "-m", "booking_mcp.seed"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://booking:booking@db:5432/booking
+    depends_on:
+      db:
+        condition: service_healthy
+
+  mcp:
+    build: .
+    environment:
+      DATABASE_URL: postgresql+psycopg://booking:booking@db:5432/booking
+      # Safe default: read-only over HTTP — no write exposure, no secret needed. To enable
+      # the write tools, set READ_ONLY=false AND a real token (the server refuses to start
+      # write-enabled over HTTP without one): `READ_ONLY=false AUTH_TOKEN=<token> docker compose up`.
+      READ_ONLY: "true"
+      AUTH_TOKEN: ${AUTH_TOKEN:-}
+    ports:
+      - "8000:8000"
+    depends_on:
+      seed:
+        condition: service_completed_successfully
