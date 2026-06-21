@@ -43,7 +43,6 @@ from .validation import DateArg, EmailArg, TimeArg
 log = logging.getLogger("booking_mcp.tools")
 
 READ = ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False)
-# CREATE is additive; MUTATE overwrites/deletes. Both are idempotent (deduped / re-applies cleanly).
 CREATE = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True)
 MUTATE = ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=True)
 

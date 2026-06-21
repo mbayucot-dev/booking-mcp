@@ -1,11 +1,8 @@
 """Per-client API-key auth for the HTTP transport.
 
-Keys are high-entropy (``bmcp_`` + 256-bit url-safe token), so we store only a
-SHA-256 hash at rest and compare in constant time — no slow KDF needed (a KDF
-defends low-entropy passwords against brute force; these tokens aren't guessable).
-Each key carries its own client_id and scopes (read / write), and an optional
-expiry, which gives per-client least privilege and rotation (multiple keys live
-at once). stdio is local/trusted and stays unauthenticated.
+Keys are stored as SHA-256 hashes only (tokens are high-entropy, so a KDF is not
+needed). Each key carries a client_id, scopes, and an optional expiry.
+stdio is local/trusted and stays unauthenticated.
 """
 
 from __future__ import annotations

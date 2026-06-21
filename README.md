@@ -1,12 +1,11 @@
-# 🧩 booking-mcp
+# booking-mcp
 
-A **standalone [MCP](https://modelcontextprotocol.io) server** (built on
+A standalone [MCP](https://modelcontextprotocol.io) server (built on
 [FastMCP](https://gofastmcp.com)) that exposes the booking datastore — the same
 PostgreSQL database the [`booking-agent`](../booking-agent) app uses — to any
-MCP-compatible client. It is intentionally **decoupled**: it does not import
-booking-agent, but connects to the shared DB with its own thin SQLAlchemy layer
-as a read-first client. booking-agent **owns the schema + migrations**; a
-schema-contract test guards against drift.
+MCP-compatible client. It is decoupled: it does not import booking-agent, but
+connects to the shared DB with its own SQLAlchemy layer. booking-agent owns the
+schema and migrations; a schema-contract test guards against drift.
 
 ## Features
 
@@ -23,19 +22,19 @@ schema-contract test guards against drift.
 - `find_next_available(service, date, time, days?, …)` — first day within the window with a free, qualified cleaner.
 - `list_staff(skill?)`, `daily_schedule(date)`, `get_client(email)`.
 
-**Tools — write** (only when `READ_ONLY=false`; `destructive`. Each **asks the user to confirm via MCP elicitation** before writing.)
+**Tools — write** (only when `READ_ONLY=false`; each asks for confirmation via MCP elicitation before writing)
 - `create_booking(...)` — client + job + appointment, idempotent (deduped on a hash of all material fields).
 - `cancel_booking(appointment_id)` — idempotent delete.
 - `reschedule_booking(appointment_id, date, time)` — moves a slot (rejects staff conflicts).
 - `add_customer_preference(email, note)`.
-- `book_from_text(request)` — parses a **free-text** request ("Book Jane a clean on June 20 at 10am, jane@…") using the **client's own LLM via MCP sampling**, then confirms + books. Requires a sampling-capable client. Idempotent.
+- `book_from_text(request)` — parses a free-text request using the client's LLM via MCP sampling, then confirms and books. Requires a sampling-capable client. Idempotent.
 
-*Writes go straight to the DB and bypass booking-agent's full LangGraph approval workflow — the elicitation confirmation is the safety gate here.*
+Writes go directly to the DB and bypass booking-agent's approval workflow. Use the workflow bridge below if you want human approval.
 
-**Tools — workflow bridge** (only when `BOOKING_AGENT_URL` is set; `openWorld`. The **safe** alternative to the direct writes — these go through booking-agent's full LangGraph human-approval gate over HTTP, no import.)
-- `book_via_workflow(message)` — start a full approval run from a natural-language request → `{run_id, status}`.
-- `get_workflow_run(run_id)` — poll status, the **approval card** (while paused), and the final response.
-- `decide_workflow_run(run_id, approve, by?, reason?)` — the human-in-the-loop approve/reject decision.
+**Tools — workflow bridge** (only when `BOOKING_AGENT_URL` is set; routes through booking-agent's human-approval workflow over HTTP)
+- `book_via_workflow(message)` — start an approval run from a natural-language request → `{run_id, status}`.
+- `get_workflow_run(run_id)` — poll status and the final response.
+- `decide_workflow_run(run_id, approve, by?, reason?)` — submit the approve/reject decision.
 
 **Prompts**: `book_cleaning(...)`, `summarize_schedule(date)`.
 
@@ -175,7 +174,7 @@ Copy `.env.example` to `.env`. All settings are read from the environment (or `.
 - **Schema ownership**: in standalone mode (`STANDALONE_MODE=true`), `booking-mcp-seed` bootstraps the schema with `create_all`. When sharing a DB with booking-agent, booking-agent owns the canonical Alembic migrations — skip the seed entirely, and the schema-contract test guards against model drift.
 - No FastAPI/LangGraph — FastMCP brings its own (Starlette/uvicorn) HTTP stack for the HTTP transport.
 - **MCP client features used**: *elicitation* (write confirmation), *sampling* (`book_from_text`). Both degrade gracefully — a client that doesn't support them just can't call those tools.
-- **Not implemented (deliberately)**: per-resource *content subscriptions* (live `resources/updated` pushes) and *argument completions* aren't first-class in this FastMCP version (only `list_changed` notifications and no server-side `completion/complete` hook), so we don't hand-roll non-idiomatic plumbing for them. Clients re-read `booking://schedule/{date}` for fresh data.
+- Per-resource content subscriptions and argument completions are not supported — neither is first-class in this FastMCP version. Clients re-read `booking://schedule/{date}` for fresh data.
 
 ## License
 

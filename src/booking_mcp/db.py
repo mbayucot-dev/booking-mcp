@@ -18,7 +18,7 @@ log = logging.getLogger("booking_mcp.db")
 
 _engine: Engine | None = None
 _sessionmaker: sessionmaker | None = None
-_owns_engine = False  # True only when we created the engine, so dispose is safe
+_owns_engine = False
 
 
 def configure(engine: Engine) -> None:

@@ -90,16 +90,10 @@ def build_server(read_only: bool | None = None, *, transport: str | None = None)
             "human-approval workflow. Use book_via_workflow for the approval-gated safe path."
         )
     auth = _auth()
-    # When keys are configured, three independent AuthMiddleware instances gate their respective
-    # tags: `write` tools need the write scope, `workflow` tools need the workflow scope, and
-    # `pii` tools/resources need the pii scope. Each middleware independently filters tools/list
-    # and blocks tools/call for its tag, so a read-scoped key is denied all three surfaces.
-    # With no keys (stdio/local, open read-only HTTP) there are no scopes to enforce.
+    # One middleware per scope tag; stacking gives AND semantics across list and call operations.
+    # Omitted when no keys are configured (stdio / open read-only HTTP).
     middleware = (
         [
-            # Enforce all four scopes independently. Each AuthMiddleware instance gates its tag
-            # across both list and call operations. Stacking them gives AND semantics: a key needs
-            # each specific scope to access tools/resources carrying that tag.
             AuthMiddleware(auth=restrict_tag("read", scopes=[READ])),
             AuthMiddleware(auth=restrict_tag("write", scopes=[WRITE])),
             AuthMiddleware(auth=restrict_tag("workflow", scopes=[WORKFLOW])),
