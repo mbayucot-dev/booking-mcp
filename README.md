@@ -45,34 +45,25 @@ are typed (structured content).
 ## Quickstart
 
 ```bash
-cd booking-mcp
-python3.11 -m venv .venv && . .venv/bin/activate
-pip install -e ".[dev]"
-cp .env.example .env          # point DATABASE_URL at the shared Postgres
-python -m booking_mcp.server  # stdio
-# inspect interactively:
-fastmcp dev src/booking_mcp/server.py
+cp .env.example .env   # point DATABASE_URL at the shared Postgres
+make install           # uv sync --dev
+make dev-up            # start Postgres on :5433 (Docker)
+make seed              # create_all + demo data (requires STANDALONE_MODE guard)
+make server            # run in stdio mode
 ```
 
-HTTP transport (remote): `build_server().run(transport="http", host="0.0.0.0", port=8000)` (the Docker default).
+For the HTTP transport on the host: `make server-http` (binds `:8000`).
 
 **Fully standalone (own DB + data)** — no booking-agent needed. One-shot the whole stack:
 
 ```bash
-docker compose up        # Postgres + schema/seed + MCP server on :8000
+make stack-up   # docker compose up (db + seed + mcp on :8000)
 ```
 
-…or against any empty Postgres, bootstrap the schema + demo data once, then run:
-
-```bash
-STANDALONE_MODE=true uv run booking-mcp-seed   # create_all + seed (requires STANDALONE_MODE)
-uv run booking-mcp
-```
-
-`booking-mcp-seed` runs `create_all` plus demo staff/clients/appointments/preferences so the
-read tools return data immediately. `STANDALONE_MODE=true` is required — the guard prevents
-accidental schema mutation against a shared DB. When sharing a DB with booking-agent, skip
-the seed: booking-agent owns the canonical Alembic migrations.
+`booking-mcp-seed` bootstraps the schema with `create_all` and populates demo staff, clients,
+appointments, and preferences so the read tools return data immediately. `STANDALONE_MODE=true`
+is required — the guard prevents accidental schema mutation against a shared DB. When sharing a
+DB with booking-agent, skip the seed: booking-agent owns the canonical Alembic migrations.
 
 ## API / Usage
 
@@ -127,10 +118,30 @@ see read tools; `write`/`workflow`/`pii` are additional gates on top. stdio need
 > **Legacy**: `AUTH_TOKEN=<token>` still works as a single full-access fallback but is deprecated
 > — it grants read+write with no scope isolation. Migrate to `API_KEYS`.
 
+## Development
+
+Common `make` targets:
+
+| Target | What it runs |
+|---|---|
+| `make install` | `uv sync --dev` |
+| `make dev-up` / `dev-stop` / `dev-down` | Postgres container lifecycle |
+| `make seed` | Schema + demo data (`STANDALONE_MODE=true`) |
+| `make server` | stdio server on host |
+| `make server-http` | HTTP server on host (`:8000`) |
+| `make stack-up` / `stack-down` | Full containerised stack |
+| `make mintkey ARGS="--client X --scopes read,pii"` | Mint an API key |
+| `make db` | psql shell into the running container |
+| `make test` | `pytest --cov=booking_mcp` |
+| `make lint` | `ruff check src tests` |
+| `make fmt` | `ruff format src tests` |
+| `make audit` | `pip-audit` |
+| `make check` | `lint` then `test` |
+
 ## Testing
 
 ```bash
-pytest --cov=booking_mcp        # in-memory FastMCP Client + Postgres testcontainer; 100% coverage
+make test   # pytest --cov=booking_mcp — requires 100% coverage to pass
 ```
 
 - **In-memory client**: tools/resources are exercised through `fastmcp.Client` against the server object — no subprocess.
