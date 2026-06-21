@@ -91,3 +91,15 @@ async def test_connection_error_becomes_tool_error():
 
     with pytest.raises(ToolError, match="Could not reach booking-agent"):
         await _call(_server(handler), "book_via_workflow", {"message": "x"})
+
+
+async def test_http_error_body_is_not_forwarded():
+    """Upstream error bodies (stack traces, SQL errors, PII) must not reach the client."""
+
+    def handler(request):
+        return httpx.Response(500, text="SELECT * FROM internal_table syntax error")
+
+    with pytest.raises(ToolError) as exc_info:
+        await _call(_server(handler), "get_workflow_run", {"run_id": "x"})
+    assert "internal_table" not in str(exc_info.value)
+    assert "500" in str(exc_info.value)

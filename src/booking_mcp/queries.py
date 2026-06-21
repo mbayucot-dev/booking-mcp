@@ -194,9 +194,18 @@ def create_booking(
 
     client = client_by_email(session, email) if email else None
     if client is None:
-        client = Client(name=name, email=email, phone=phone, address=address)
-        session.add(client)
-        session.flush()
+        new_client = Client(name=name, email=email, phone=phone, address=address)
+        try:
+            with session.begin_nested():  # SAVEPOINT: rolls back only client INSERT on race
+                session.add(new_client)
+                session.flush()
+            client = new_client
+        except IntegrityError:  # pragma: no cover - concurrent same-email race
+            # Another concurrent create_booking for this email won the INSERT.
+            # SAVEPOINT is rolled back; outer transaction is intact — re-fetch the winner.
+            client = client_by_email(session, email)
+            if client is None:  # pragma: no cover - some other constraint
+                raise
 
     job = Job(client_id=client.id, service=service, address=address)
     session.add(job)
@@ -209,7 +218,8 @@ def create_booking(
         session.flush()  # INSERT happens here — uq_appt_staff_slot fires on a double-book
     except IntegrityError as e:
         session.rollback()
-        if "uq_appt_staff_slot" in str(e.orig):
+        orig = str(e.orig)
+        if "uq_appt_staff_slot" in orig:
             raise ValueError("That staff member is already booked at this time.") from e
         raise  # pragma: no cover - some other constraint (defensive) → re-raise
 

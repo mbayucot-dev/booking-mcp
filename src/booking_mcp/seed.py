@@ -165,7 +165,15 @@ def seed_all(session_factory: sessionmaker) -> dict:
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
-    db.create_all()  # bootstrap the schema for a standalone/fresh DB
+    from .config import get_settings
+
+    if not get_settings().standalone_mode:
+        raise SystemExit(
+            "ERROR: Refusing to seed — STANDALONE_MODE is not true. "
+            "Seeding against the shared booking-agent DB would corrupt production data. "
+            "Set STANDALONE_MODE=true for demo/dev use only."
+        )
+    db.create_all()
     summary = seed_all(db.get_sessionmaker())
     log.info("booking-mcp seeded (rows created this run): %s", summary)
 

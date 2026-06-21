@@ -15,6 +15,20 @@ def test_health_status_ok(Session):
     assert body == {"status": "ok"}
 
 
+def test_health_status_unavailable_when_db_is_down(monkeypatch):
+    from contextlib import contextmanager
+
+    @contextmanager
+    def broken_session():
+        raise Exception("simulated DB failure")
+        yield  # required by @contextmanager even though unreachable
+
+    monkeypatch.setattr(server.db, "session", broken_session)
+    body, code = server.health_status()
+    assert code == 503
+    assert body == {"status": "unavailable"}
+
+
 async def test_lifespan_runs_and_keeps_injected_engine(Session):
     # Entering/exiting the server lifespan calls db.dispose(); for an injected
     # (test) engine that's a no-op, so the DB stays usable afterward.

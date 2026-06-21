@@ -9,12 +9,15 @@ from typing import Annotated
 
 from pydantic import AfterValidator, Field
 
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _TIME_RE = re.compile(r"^\d{2}:\d{2}$")
 
 
 def _valid_date(v: str) -> str:
+    if not _DATE_RE.match(v):
+        raise ValueError(f"{v!r} is not a valid ISO date (YYYY-MM-DD)")
     try:
-        _date.fromisoformat(v)  # enforces YYYY-MM-DD and a real calendar date
+        _date.fromisoformat(v)  # enforces calendar validity (e.g. rejects Feb 30)
     except ValueError as e:
         raise ValueError(f"{v!r} is not a valid ISO date (YYYY-MM-DD)") from e
     return v

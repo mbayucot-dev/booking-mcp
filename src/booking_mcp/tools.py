@@ -35,6 +35,8 @@ from .schemas import (
     PreferenceResult,
     RescheduleResult,
     StaffDTO,
+    _mask_address,
+    _mask_phone,
 )
 from .validation import DateArg, EmailArg, TimeArg
 
@@ -133,9 +135,19 @@ def register(mcp: FastMCP, *, read_only: bool) -> None:
                 for a, svc in queries.appointments_with_service(s, date)
             ]
 
-    @mcp.tool(annotations=READ, tags={"read"})
-    def get_client(email: EmailArg) -> ClientDTO | None:
-        """Look up a client by email with their contacts and saved preferences."""
+    @mcp.tool(annotations=READ, tags={"read", "pii"})
+    def get_client(email: EmailArg, ctx: Context) -> ClientDTO | None:
+        """Look up a client by email with their contacts and saved preferences.
+        Phone and address are masked by default (REDACT_PII=true); set false only for
+        internal/admin tooling backed by a scoped token."""
+        redact = get_settings().redact_pii
+        log.info(
+            "pii_access: tool=get_client request_id=%s client_id=%s email=%s redacted=%s",
+            ctx.request_id,
+            ctx.client_id,
+            email,
+            redact,
+        )
         with _guard(), session() as s:
             row = queries.client_by_email(s, email)
             if row is None:
@@ -144,10 +156,14 @@ def register(mcp: FastMCP, *, read_only: bool) -> None:
                 id=row.id,
                 name=row.name,
                 email=row.email,
-                phone=row.phone,
-                address=row.address,
+                phone=_mask_phone(row.phone) if redact else row.phone,
+                address=_mask_address(row.address) if redact else row.address,
                 contacts=[
-                    ContactDTO(name=c.name, email=c.email, phone=c.phone)
+                    ContactDTO(
+                        name=c.name,
+                        email=c.email,
+                        phone=_mask_phone(c.phone) if redact else c.phone,
+                    )
                     for c in queries.contacts_for(s, row.id)
                 ],
                 memories=[
@@ -235,7 +251,18 @@ def register(mcp: FastMCP, *, read_only: bool) -> None:
                 except ValueError as e:  # slot already taken (uq_appt_staff_slot)
                     raise ToolError(str(e)) from e
 
-        return BookingResult(**await anyio.to_thread.run_sync(_create))
+        result = BookingResult(**await anyio.to_thread.run_sync(_create))
+        log.info(
+            "booking created: request_id=%s client_id=%s id=%s email=%s service=%s date=%s idempotent=%s",
+            ctx.request_id,
+            ctx.client_id,
+            result.appointment_id,
+            email,
+            service,
+            date,
+            result.idempotent,
+        )
+        return result
 
     @mcp.tool(annotations=MUTATE, tags={"write"})
     async def cancel_booking(
@@ -252,9 +279,17 @@ def register(mcp: FastMCP, *, read_only: bool) -> None:
             with _guard(), session() as s:
                 return queries.cancel_appointment(s, appointment_id)
 
-        return CancelResult(
+        result = CancelResult(
             appointment_id=appointment_id, cancelled=await anyio.to_thread.run_sync(_cancel)
         )
+        log.info(
+            "booking cancelled: request_id=%s client_id=%s id=%s cancelled=%s",
+            ctx.request_id,
+            ctx.client_id,
+            appointment_id,
+            result.cancelled,
+        )
+        return result
 
     @mcp.tool(annotations=MUTATE, tags={"write"})
     async def reschedule_booking(
@@ -281,7 +316,15 @@ def register(mcp: FastMCP, *, read_only: bool) -> None:
                     raise ToolError(f"Unknown appointment_id: {appointment_id!r}")
                 return res
 
-        return RescheduleResult(**await anyio.to_thread.run_sync(_reschedule))
+        result = RescheduleResult(**await anyio.to_thread.run_sync(_reschedule))
+        log.info(
+            "booking rescheduled: request_id=%s client_id=%s id=%s new_slot=%s",
+            ctx.request_id,
+            ctx.client_id,
+            appointment_id,
+            result.start_date,
+        )
+        return result
 
     @mcp.tool(annotations=MUTATE, tags={"write"})
     async def add_customer_preference(
@@ -299,7 +342,15 @@ def register(mcp: FastMCP, *, read_only: bool) -> None:
             with _guard(), session() as s:
                 return queries.upsert_preference(s, email, note)
 
-        return PreferenceResult(**await anyio.to_thread.run_sync(_save))
+        result = PreferenceResult(**await anyio.to_thread.run_sync(_save))
+        log.info(
+            "preference saved: request_id=%s client_id=%s email=%s created=%s",
+            ctx.request_id,
+            ctx.client_id,
+            email,
+            result.created,
+        )
+        return result
 
     @mcp.tool(annotations=CREATE, tags={"write"})
     async def book_from_text(
@@ -310,7 +361,18 @@ def register(mcp: FastMCP, *, read_only: bool) -> None:
         (MCP sampling), then create the booking after the user confirms. Requires a
         sampling-capable client. Idempotent. Bypasses booking-agent's approval workflow (the
         confirmation is the gate); only registered when READ_ONLY is false. For the full
-        approval workflow, use book_via_workflow."""
+        approval workflow, use book_via_workflow.
+
+        Production note: set FORCE_WORKFLOW_FOR_SAMPLING=true to disable the direct-write path
+        and redirect all sampled bookings through the approval workflow (book_via_workflow).
+        Sampled output has implicit trust risks; the workflow gate adds a human checkpoint."""
+        if get_settings().force_workflow_for_sampling:
+            raise ToolError(
+                "book_from_text is disabled by server policy (FORCE_WORKFLOW_FOR_SAMPLING=true): "
+                "sampled output must go through the approval workflow to prevent automated "
+                "booking abuse. Use book_via_workflow to route the request through the "
+                "booking-agent approval process."
+            )
         try:
             with anyio.fail_after(get_settings().sample_timeout):
                 sampled = await ctx.sample(
@@ -327,7 +389,21 @@ def register(mcp: FastMCP, *, read_only: bool) -> None:
         try:
             fields = BookingExtract.model_validate_json(_strip_fences(sampled.text))
         except (ValidationError, ValueError) as e:
+            log.warning(
+                "book_from_text extraction failed: request_id=%s error=%s",
+                ctx.request_id,
+                e,
+            )
             raise ToolError(f"Could not extract booking details from the request: {e}") from e
+
+        null_fields = [k for k, v in fields.model_dump().items() if v is None]
+        log.info(
+            "book_from_text extraction ok: request_id=%s service=%s date=%s null_fields=%s",
+            ctx.request_id,
+            fields.service,
+            fields.date,
+            null_fields or "none",
+        )
 
         summary = f"Book {fields.service} for {fields.customer_name} on {fields.date} at {fields.time}"
         if not await _confirm(ctx, summary + "?"):

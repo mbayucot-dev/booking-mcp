@@ -91,7 +91,7 @@ def seed_client(Session, *, email="priya@example.com", name="Priya Nair") -> str
 def book(Session, *, staff_id, start_date, service="cleaning"):
     """Create a job + appointment occupying a staff slot."""
     with Session() as s:
-        client = Client(name="C", email="c@x.com", phone="1", address="z")
+        client = Client(name="C", email=None, phone="1", address="z")
         s.add(client)
         s.flush()
         job = Job(client_id=client.id, service=service, address="z")

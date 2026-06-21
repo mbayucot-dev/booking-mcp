@@ -4,11 +4,11 @@ version = "0.1.0"
 description = "Standalone MCP server exposing the booking datastore over the Model Context Protocol"
 requires-python = ">=3.11"
 dependencies = [
-    "fastmcp>=2.3",
+    "fastmcp>=3.4.1,<4",  # 3.4.1 floors Starlette at >=1.0.1 (CVE-2026-48710)
     "sqlalchemy>=2",
     "psycopg[binary]>=3.1",
     "pydantic>=2",
-    "pydantic-settings>=2",
+    "pydantic-settings>=2.14.2",  # GHSA-4xgf-cpjx-pc3j fixed in 2.14.2
     "httpx>=0.27",  # decoupled HTTP bridge to booking-agent's approval workflow
 ]
 
@@ -19,6 +19,9 @@ dev = [
     "pytest-cov>=5",
     "testcontainers>=4",
     "ruff>=0.6",
+    "pip-audit>=2.9",
+    "msgpack>=1.2.1",  # GHSA-6v7p-g79w-8964 (transitive via pip-audit→CacheControl) fixed in 1.2.1
+    "hypothesis>=6.130",
 ]
 
 [project.scripts]
@@ -36,6 +39,12 @@ where = ["src"]
 pythonpath = ["src", "."]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+filterwarnings = [
+    # StarletteDeprecationWarning is defined in starlette.exceptions, not starlette.testclient.
+    "ignore::starlette.exceptions.StarletteDeprecationWarning",
+    # opentelemetry's importlib-metadata shim uses a deprecated SelectableGroups interface.
+    "ignore:SelectableGroups dict interface is deprecated:DeprecationWarning:opentelemetry",
+]
 
 [tool.coverage.run]
 source = ["booking_mcp"]

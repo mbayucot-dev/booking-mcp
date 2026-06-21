@@ -71,8 +71,15 @@ def get_engine() -> Engine:
 
 
 def create_all() -> None:
-    """Create any missing tables (idempotent). For standalone use against a fresh DB;
-    a no-op when tables exist, so it's safe against the shared booking-agent DB."""
+    """Create any missing tables. DEMO/STANDALONE ONLY — requires STANDALONE_MODE=true.
+    This guard prevents accidental schema creation against the shared booking-agent DB."""
+    s = get_settings()
+    if not s.standalone_mode:
+        raise RuntimeError(
+            "create_all() refused: STANDALONE_MODE is not true. "
+            "Set STANDALONE_MODE=true only for demo/dev use — never against the shared "
+            "booking-agent database."
+        )
     from .models import Base
 
     Base.metadata.create_all(get_engine())

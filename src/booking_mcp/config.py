@@ -2,7 +2,20 @@
 
 from __future__ import annotations
 
+from urllib.parse import urlparse
+
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Cloud instance-metadata endpoints that must never be reachable via BOOKING_AGENT_URL.
+# An SSRF hit here hands an attacker IAM credentials from the cloud provider.
+_METADATA_HOSTS: frozenset[str] = frozenset(
+    {
+        "169.254.169.254",  # AWS/GCP/Azure IMDS (link-local)
+        "metadata.google.internal",
+        "metadata.internal",
+    }
+)
 
 
 class Settings(BaseSettings):
@@ -28,6 +41,15 @@ class Settings(BaseSettings):
 
     log_level: str = "INFO"
 
+    # Must be explicitly true to allow create_all() / seed to run.
+    # Prevents accidental schema mutation against the shared booking-agent DB.
+    standalone_mode: bool = False
+
+    # Mask phone/address in client resources and tools before returning to MCP clients.
+    # Resources are pulled into model context, so PII spreads to prompts/logs/transcripts.
+    # Set false only for internal tooling (e.g. admin API backed by a scoped token).
+    redact_pii: bool = True
+
     # When set, HTTP clients must send `Authorization: Bearer <token>`. Ignored for stdio.
     auth_token: str | None = None
 
@@ -35,6 +57,39 @@ class Settings(BaseSettings):
     # booking goes through its full approval workflow. Decoupled: HTTP only, no import.
     booking_agent_url: str | None = None
     booking_agent_timeout: float = 10.0
+
+    # When true, book_from_text refuses to do a direct DB write and redirects callers to
+    # book_via_workflow. Recommended in production: sampled output has implicit trust risks
+    # (quota abuse, hidden prompt manipulation) and should go through the approval workflow.
+    force_workflow_for_sampling: bool = False
+
+    @field_validator("booking_agent_url")
+    @classmethod
+    def _check_booking_agent_url(cls, v: str | None) -> str | None:
+        """Block SSRF attack vectors via a misconfigured BOOKING_AGENT_URL.
+
+        The most dangerous scenario is a metadata endpoint URL that would let
+        booking-mcp act as a confused deputy and leak cloud IAM credentials.
+        Non-http/https schemes (file://, javascript://) are also blocked.
+        Private IP ranges are *not* blocked here — they are legitimate in
+        internal/dev deployments. Only metadata endpoints are hard-blocked.
+        """
+        if v is None:
+            return None
+        parsed = urlparse(v)
+        if parsed.scheme not in ("http", "https"):
+            raise ValueError(
+                f"BOOKING_AGENT_URL scheme must be http or https; got {parsed.scheme!r}. "
+                "file://, javascript://, and other non-HTTP schemes are blocked (SSRF risk)."
+            )
+        host = (parsed.hostname or "").lower()
+        if host in _METADATA_HOSTS:
+            raise ValueError(
+                f"BOOKING_AGENT_URL host {host!r} is a cloud metadata endpoint. "
+                "Requests to instance-metadata addresses are blocked to prevent "
+                "IAM credential theft via SSRF."
+            )
+        return v
 
 
 def get_settings() -> Settings:

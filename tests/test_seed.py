@@ -1,5 +1,7 @@
 """Standalone seed: schema bootstrap + idempotent demo data."""
 
+import pytest
+
 import booking_mcp.seed as seed
 from booking_mcp.models import Appointment, Client, Contact, CustomerMemory, Staff
 from booking_mcp.seed import DEMO_APPOINTMENTS, seed_all
@@ -37,9 +39,16 @@ def test_seed_skips_appointment_for_unknown_staff(Session, monkeypatch):
     assert summary["appointments"] == 0  # unknown staff name → skipped, no crash
 
 
-def test_main_bootstraps_schema_and_seeds(Session):
+def test_main_bootstraps_schema_and_seeds(Session, monkeypatch):
+    monkeypatch.setenv("STANDALONE_MODE", "true")
     # Session fixture configured db to the testcontainer; main() runs create_all + seed_all.
     seed.main()
     with Session() as s:
         assert s.query(Staff).count() == 3
         assert s.query(Appointment).count() == len(DEMO_APPOINTMENTS)
+
+
+def test_main_blocked_without_standalone_mode(monkeypatch):
+    monkeypatch.delenv("STANDALONE_MODE", raising=False)
+    with pytest.raises(SystemExit, match="STANDALONE_MODE"):
+        seed.main()

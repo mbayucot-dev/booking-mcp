@@ -9,6 +9,7 @@ from fastmcp.exceptions import ToolError
 
 from booking_mcp.models import Appointment
 from booking_mcp.models import Client as ClientRow
+from booking_mcp.schemas import _mask_address, _mask_phone
 from booking_mcp.server import build_server
 from tests.conftest import book, seed_client, seed_staff
 
@@ -454,7 +455,7 @@ def _sampler(payload: str):
     return handler
 
 
-async def _call_text(server, request, *, payload, confirm=True):
+async def _book_from_text(server, request, *, payload, confirm=True):
     async with Client(
         server, sampling_handler=_sampler(payload), elicitation_handler=_handler(confirm)
     ) as c:
@@ -463,7 +464,7 @@ async def _call_text(server, request, *, payload, confirm=True):
 
 async def test_book_from_text_creates_booking(Session):
     server = build_server(read_only=False)
-    res = await _call_text(server, "Book Jane a clean", payload=_EXTRACT_JSON)
+    res = await _book_from_text(server, "Book Jane a clean", payload=_EXTRACT_JSON)
     assert res.data.idempotent is False
     with Session() as s:
         assert s.query(Appointment).count() == 1
@@ -474,7 +475,7 @@ async def test_book_from_text_creates_booking(Session):
 async def test_book_from_text_strips_code_fences(Session):
     server = build_server(read_only=False)
     fenced = f"```json\n{_EXTRACT_JSON}\n```"
-    res = await _call_text(server, "Book Jane a clean", payload=fenced)
+    res = await _book_from_text(server, "Book Jane a clean", payload=fenced)
     assert res.data.idempotent is False
     with Session() as s:
         assert s.query(Appointment).count() == 1
@@ -483,7 +484,7 @@ async def test_book_from_text_strips_code_fences(Session):
 async def test_book_from_text_unparseable_extraction_raises(Session):
     server = build_server(read_only=False)
     with pytest.raises(ToolError):
-        await _call_text(server, "uhh do a thing", payload="Sorry, I couldn't parse that.")
+        await _book_from_text(server, "uhh do a thing", payload="Sorry, I couldn't parse that.")
     with Session() as s:
         assert s.query(Appointment).count() == 0  # nothing written
 
@@ -492,7 +493,7 @@ async def test_book_from_text_invalid_field_raises(Session):
     # Valid JSON but a hallucinated impossible date → rejected before any write.
     bad = _EXTRACT_JSON.replace("2026-06-20", "2026-13-40")
     with pytest.raises(ToolError):
-        await _call_text(build_server(read_only=False), "Book Jane", payload=bad)
+        await _book_from_text(build_server(read_only=False), "Book Jane", payload=bad)
     with Session() as s:
         assert s.query(Appointment).count() == 0
 
@@ -500,7 +501,7 @@ async def test_book_from_text_invalid_field_raises(Session):
 async def test_book_from_text_declined_writes_nothing(Session):
     server = build_server(read_only=False)
     with pytest.raises(ToolError):
-        await _call_text(server, "Book Jane a clean", payload=_EXTRACT_JSON, confirm=False)
+        await _book_from_text(server, "Book Jane a clean", payload=_EXTRACT_JSON, confirm=False)
     with Session() as s:
         assert s.query(Appointment).count() == 0
 
@@ -544,6 +545,64 @@ async def test_book_from_text_times_out_on_hung_client_llm(Session, monkeypatch)
     monkeypatch.setattr("fastmcp.server.context.Context.sample", _slow_sample)
     server = build_server(read_only=False)
     with pytest.raises(ToolError, match="did not respond in time"):
-        await _call_text(server, "Book Jane a clean", payload="ignored")
+        await _book_from_text(server, "Book Jane a clean", payload="ignored")
+    with Session() as s:
+        assert s.query(Appointment).count() == 0  # nothing written
+
+
+# --- PII masking helpers -------------------------------------------------------
+
+
+def test_mask_phone_shows_last_four_digits():
+    assert _mask_phone("0400111222") == "***1222"
+
+
+def test_mask_phone_returns_none_for_none():
+    assert _mask_phone(None) is None
+
+
+def test_mask_phone_short_number_returns_stars():
+    assert _mask_phone("123") == "***"  # fewer than 4 digits
+
+
+def test_mask_address_redacts_string():
+    assert _mask_address("5 Park Rd, Brisbane") == "[REDACTED]"
+
+
+def test_mask_address_returns_none_for_none():
+    assert _mask_address(None) is None
+
+
+# --- get_client: PII redaction -------------------------------------------------
+
+
+async def test_get_client_redacts_pii_by_default(Session):
+    """Default REDACT_PII=true: phone masked, address replaced."""
+    seed_client(Session)
+    res = await _call(build_server(read_only=True), "get_client", {"email": "priya@example.com"})
+    assert res.data.phone == "***1222"
+    assert res.data.address == "[REDACTED]"
+    assert res.data.contacts[0].phone == "***1222"
+
+
+async def test_get_client_shows_full_pii_when_redact_disabled(Session, monkeypatch):
+    """REDACT_PII=false: phone/address returned verbatim."""
+    monkeypatch.setenv("REDACT_PII", "false")
+    seed_client(Session)
+    res = await _call(build_server(read_only=True), "get_client", {"email": "priya@example.com"})
+    assert res.data.phone == "0400111222"
+    assert res.data.address == "5 Park Rd"
+
+
+# --- force_workflow_for_sampling production kill-switch -----------------------
+
+
+async def test_book_from_text_blocked_when_force_workflow_for_sampling(Session, monkeypatch):
+    """FORCE_WORKFLOW_FOR_SAMPLING=true must reject book_from_text before it samples."""
+    monkeypatch.setenv("FORCE_WORKFLOW_FOR_SAMPLING", "true")
+    server = build_server(read_only=False)
+    with pytest.raises(ToolError, match="FORCE_WORKFLOW_FOR_SAMPLING"):
+        async with Client(server, elicitation_handler=_handler(True)) as c:
+            await c.call_tool("book_from_text", {"request": "Book Jane a clean"})
     with Session() as s:
         assert s.query(Appointment).count() == 0  # nothing written

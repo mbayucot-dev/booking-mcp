@@ -114,6 +114,18 @@ class BookingExtract(BaseModel):
     address: str | None = None
 
 
+def _mask_phone(v: str | None) -> str | None:
+    """Return the last 4 digits prefixed with ***, or None if no value."""
+    if v is None:
+        return None
+    digits = "".join(c for c in v if c.isdigit())
+    return ("***" + digits[-4:]) if len(digits) >= 4 else "***"
+
+
+def _mask_address(v: str | None) -> str | None:
+    return None if v is None else "[REDACTED]"
+
+
 class WorkflowRun(BaseModel):
     """A booking-agent run as seen over the HTTP bridge (mirrors its RunResponse).
     ``approval_card`` is set while paused for a human decision; ``final_response`` once done."""

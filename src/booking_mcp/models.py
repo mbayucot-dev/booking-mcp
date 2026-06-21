@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 from sqlalchemy import (
     JSON,
     Boolean,
+    CheckConstraint,
     DateTime,
     Float,
     ForeignKey,
@@ -75,10 +76,14 @@ Index("ix_staff_lat_lng", Staff.latitude, Staff.longitude)
 
 class Client(Base):
     __tablename__ = "clients"
+    # uq_client_email: one row per email address — prevents duplicate customers from
+    # concurrent first-time bookings. NULL emails are exempt (Postgres NULLs don't
+    # compare equal, so multiple NULL rows are allowed).
+    __table_args__ = (UniqueConstraint("email", name="uq_client_email"),)
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     name: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    email: Mapped[str | None] = mapped_column(String(255), index=True, nullable=True)
+    email: Mapped[str | None] = mapped_column(String(255), nullable=True)
     phone: Mapped[str | None] = mapped_column(String(64), nullable=True)
     address: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
@@ -129,9 +134,18 @@ Index(
 )
 
 
+_MEMORY_TYPES = ("preference", "communication", "vip", "constraint")
+
 class CustomerMemory(Base):
     __tablename__ = "customer_memories"
-    __table_args__ = (UniqueConstraint("customer_key", "memory_type", name="uq_customer_memory"),)
+    __table_args__ = (
+        UniqueConstraint("customer_key", "memory_type", name="uq_customer_memory"),
+        # DB-level guard so a stale migration or direct SQL can't insert unknown types.
+        CheckConstraint(
+            f"memory_type IN {_MEMORY_TYPES!r}",
+            name="ck_customer_memory_type",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     customer_key: Mapped[str] = mapped_column(String(255), index=True)

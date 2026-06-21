@@ -40,7 +40,7 @@ def health_status() -> tuple[dict, int]:
         with db.session() as s:
             s.execute(text("SELECT 1"))
         return {"status": "ok"}, 200
-    except Exception:  # pragma: no cover - only when the DB is down
+    except Exception:
         log.exception("readiness check failed")
         return {"status": "unavailable"}, 503
 
@@ -95,7 +95,7 @@ def build_server(read_only: bool | None = None, *, transport: str | None = None)
         )
 
     @mcp.custom_route("/_health", methods=["GET"])
-    async def health(request: Request) -> JSONResponse:  # pragma: no cover - HTTP-only adapter
+    async def health(request: Request) -> JSONResponse:
         body, code = health_status()
         return JSONResponse(body, status_code=code)
 
@@ -103,7 +103,10 @@ def build_server(read_only: bool | None = None, *, transport: str | None = None)
 
 
 # Module-level instance for `fastmcp run booking_mcp.server:mcp`.
-mcp = build_server()
+# Hardcoded read-only: no transport context is available at import time, so
+# _check_write_auth cannot fire. Write mode requires explicit build_server() calls
+# (main() for stdio, the Dockerfile CMD for HTTP with transport= and AUTH_TOKEN).
+mcp = build_server(read_only=True)
 
 
 def main() -> None:  # pragma: no cover - stdio entrypoint

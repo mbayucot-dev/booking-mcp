@@ -47,10 +47,17 @@ def register(
                 resp.raise_for_status()
                 return resp.json()
         except httpx.HTTPStatusError as e:
-            detail = e.response.text.strip()
+            # Do not forward the upstream body verbatim — it may contain stack traces,
+            # SQL errors, internal IDs, or PII. Surface only the status code and path.
+            log.error(
+                "booking-agent %s %s → HTTP %s: %s",
+                method,
+                path,
+                e.response.status_code,
+                e.response.text[:500],
+            )
             raise ToolError(
                 f"booking-agent returned HTTP {e.response.status_code} for {method} {path}"
-                + (f": {detail}" if detail else "")
             ) from e
         except httpx.HTTPError as e:
             raise ToolError(f"Could not reach booking-agent at {base}: {e}") from e

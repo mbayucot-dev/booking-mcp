@@ -1,5 +1,6 @@
 """The lazy session factory (used when no engine is injected)."""
 
+import pytest
 from sqlalchemy import text
 
 from booking_mcp import db
@@ -24,6 +25,17 @@ def test_lazy_factory_postgres_branch(monkeypatch):
         assert db._factory() is not None
     finally:
         db._sessionmaker = None
+
+
+def test_create_all_blocked_without_standalone_mode(monkeypatch):
+    monkeypatch.delenv("STANDALONE_MODE", raising=False)
+    with pytest.raises(RuntimeError, match="STANDALONE_MODE"):
+        db.create_all()
+
+
+def test_create_all_allowed_in_standalone_mode(Session, monkeypatch):
+    monkeypatch.setenv("STANDALONE_MODE", "true")
+    db.create_all()  # tables already exist — no-op; must not raise
 
 
 def test_dispose_releases_owned_engine(monkeypatch):
