@@ -18,9 +18,12 @@ services:
 
   seed:
     build: .
-    command: ["python", "-m", "booking_mcp.seed"]
+    command: ["uv", "run", "python", "-m", "booking_mcp.seed"]
     environment:
       DATABASE_URL: postgresql+psycopg://booking:booking@db:5432/booking
+      # Required: seed.py / create_all() refuse to run without this guard so they
+      # cannot accidentally mutate a shared DB. The Compose stack IS standalone.
+      STANDALONE_MODE: "true"
     depends_on:
       db:
         condition: service_healthy
@@ -30,9 +33,10 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg://booking:booking@db:5432/booking
       # Safe default: read-only over HTTP — no write exposure, no secret needed. To enable
-      # the write tools, set READ_ONLY=false AND a real token (the server refuses to start
-      # write-enabled over HTTP without one): `READ_ONLY=false AUTH_TOKEN=<token> docker compose up`.
+      # the write tools, set READ_ONLY=false AND mint a key:
+      # API_KEYS='[{"hash":"<sha256>","client_id":"ops","scopes":["read","write"]}]' docker compose up
       READ_ONLY: "true"
+      API_KEYS: ${API_KEYS:-}
       AUTH_TOKEN: ${AUTH_TOKEN:-}
     ports:
       - "8000:8000"

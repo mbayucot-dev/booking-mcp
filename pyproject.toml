@@ -27,6 +27,7 @@ dev = [
 [project.scripts]
 booking-mcp = "booking_mcp.server:main"
 booking-mcp-seed = "booking_mcp.seed:main"
+booking-mcp-mintkey = "booking_mcp.mint_key:main"
 
 [build-system]
 requires = ["setuptools>=68"]

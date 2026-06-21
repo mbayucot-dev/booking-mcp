@@ -50,7 +50,13 @@ class Settings(BaseSettings):
     # Set false only for internal tooling (e.g. admin API backed by a scoped token).
     redact_pii: bool = True
 
-    # When set, HTTP clients must send `Authorization: Bearer <token>`. Ignored for stdio.
+    # Per-client API keys (JSON array of {hash, client_id, scopes, [expires_at]}); hashes only,
+    # never plaintext. Mint records with `booking-mcp-mintkey`. Enables least-privilege read/write
+    # scopes and rotation (several active keys). Ignored for stdio (local/trusted).
+    api_keys: str | None = None
+
+    # Deprecated single-key fallback: one shared static token granting full (read+write) access.
+    # Superseded by API_KEYS; kept for backward compatibility. Ignored for stdio.
     auth_token: str | None = None
 
     # When set, the workflow-bridge tools are registered and POST to booking-agent so a

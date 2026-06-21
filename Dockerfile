@@ -1,7 +1,7 @@
 FROM python:3.11-slim
 
 # Install uv for reproducible, lockfile-based installs.
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+COPY --from=ghcr.io/astral-sh/uv:0.11.23 /uv /usr/local/bin/uv
 
 WORKDIR /app
 COPY pyproject.toml uv.lock ./

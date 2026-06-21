@@ -40,8 +40,7 @@ schema-contract test guards against drift.
 **Prompts**: `book_cleaning(...)`, `summarize_schedule(date)`.
 
 All inputs are validated (real calendar dates/times, email format); all outputs
-are typed (structured content). Set `AUTH_TOKEN` to require `Bearer` auth on the
-HTTP transport (stdio is local/trusted).
+are typed (structured content).
 
 ## Quickstart
 
@@ -66,15 +65,14 @@ docker compose up        # Postgres + schema/seed + MCP server on :8000
 …or against any empty Postgres, bootstrap the schema + demo data once, then run:
 
 ```bash
-python -m booking_mcp.seed     # or:  booking-mcp-seed   (create_all + seed, idempotent)
-python -m booking_mcp.server
+STANDALONE_MODE=true uv run booking-mcp-seed   # create_all + seed (requires STANDALONE_MODE)
+uv run booking-mcp
 ```
 
-`booking-mcp-seed` runs `create_all` (idempotent — a no-op against a DB that
-already has the tables) plus demo staff/clients/appointments/preferences, so the
-read tools return data immediately. When sharing a DB with booking-agent, you
-don't need it — booking-agent owns the canonical migrations; this is purely for
-running booking-mcp on its own.
+`booking-mcp-seed` runs `create_all` plus demo staff/clients/appointments/preferences so the
+read tools return data immediately. `STANDALONE_MODE=true` is required — the guard prevents
+accidental schema mutation against a shared DB. When sharing a DB with booking-agent, skip
+the seed: booking-agent owns the canonical Alembic migrations.
 
 ## API / Usage
 
@@ -98,23 +96,36 @@ Any MCP client takes the standard `mcpServers` config (the same JSON an `mcp add
 
 (`booking-mcp` is the console script installed into the venv.)
 
-**Remote (HTTP)** — connect over the streamable-HTTP transport with a Bearer key. Run the server
-with `AUTH_TOKEN` set (it refuses to start write-enabled over HTTP without one), and send the same
-token as an `Authorization` header:
+**Remote (HTTP)** — connect over the streamable-HTTP transport with a Bearer key. Mint a key, then
+pass the hash in `API_KEYS` (the server refuses to start write-enabled over HTTP without credentials):
+
+```bash
+# 1. Mint a key (prints plaintext once + the JSON record to add to API_KEYS)
+#    Available scopes: read, write, workflow, pii (grant only what the client needs)
+booking-mcp-mintkey --client claude-desktop --scopes read,write,pii
+
+# 2. Start the server
+API_KEYS='[{"hash":"<paste-hash>","client_id":"claude-desktop","scopes":["read","write","pii"]}]' \
+  READ_ONLY=false booking-mcp
+```
 
 ```json
 {
   "mcpServers": {
     "booking": {
       "url": "http://your-host:8000/mcp",
-      "headers": { "Authorization": "Bearer <AUTH_TOKEN>" }
+      "headers": { "Authorization": "Bearer <plaintext-key>" }
     }
   }
 }
 ```
 
-Server side: `AUTH_TOKEN=<token> booking-mcp` (or set it in `.env`). A client with no/wrong token
-gets `401`; stdio needs no token.
+A client with no/wrong key gets `401`. Scope enforcement is strict: a key without `read` cannot
+see read tools; `write`/`workflow`/`pii` are additional gates on top. stdio needs no token
+(local/trusted — all surfaces are open).
+
+> **Legacy**: `AUTH_TOKEN=<token>` still works as a single full-access fallback but is deprecated
+> — it grants read+write with no scope isolation. Migrate to `API_KEYS`.
 
 ## Testing
 
@@ -134,7 +145,11 @@ Copy `.env.example` to `.env`. All settings are read from the environment (or `.
 |---|---|---|
 | `DATABASE_URL` | `postgresql+psycopg://booking:booking@localhost:5432/booking` | The same Postgres booking-agent uses; booking-agent owns the schema, this is a client. |
 | `READ_ONLY` | `true` | Set to `false` to enable the write tools. Writes bypass booking-agent's human-approval workflow — enable deliberately. |
-| `AUTH_TOKEN` | _(empty)_ | When set, HTTP clients must send `Authorization: Bearer <token>`. Ignored for stdio (local/trusted). |
+| `STANDALONE_MODE` | `false` | **Must be `true`** to run `booking-mcp-seed` / `create_all()`. Guards against accidental schema mutation on a shared DB. Not needed when connecting to a DB already managed by booking-agent. |
+| `API_KEYS` | _(empty)_ | Preferred HTTP auth. JSON array of `{hash, client_id, scopes}` records — hashes only, never plaintext. Mint records with `booking-mcp-mintkey`. All four scopes (`read`, `write`, `workflow`, `pii`) are enforced at the auth layer: a key sees only the surfaces its scopes explicitly cover. |
+| `AUTH_TOKEN` | _(empty)_ | Deprecated: single static token granting full access (all scopes). Superseded by `API_KEYS`. Kept for backward compatibility. |
+| `REDACT_PII` | `true` | Mask phone numbers (last-4 digits) and addresses (`[REDACTED]`) in client resources and `get_client`. Resources are pulled into model context — PII spreads to prompts/logs/transcripts. Set `false` only for internal tooling backed by a scoped key. |
+| `FORCE_WORKFLOW_FOR_SAMPLING` | `false` | Redirect `book_from_text` to `book_via_workflow` instead of writing directly. Recommended in production: sampled LLM output carries implicit trust/quota risks. |
 | `BOOKING_AGENT_URL` | _(empty)_ | When set, the workflow-bridge tools are registered and POST to booking-agent so a booking goes through its full approval workflow. Decoupled: HTTP only, no import. |
 | `BOOKING_AGENT_TIMEOUT` | `10.0` | HTTP timeout (seconds) for workflow-bridge calls to booking-agent. |
 | `SAMPLE_TIMEOUT` | `30.0` | Cap on the client's LLM sampling call in `book_from_text` so a hung client can't pin a worker. |
@@ -146,7 +161,7 @@ Copy `.env.example` to `.env`. All settings are read from the environment (or `.
 | `LOG_LEVEL` | `INFO` | Logging level. |
 
 ## Notes
-- **Schema ownership**: standalone, `booking-mcp-seed` bootstraps the schema with an idempotent `create_all`. When sharing a DB with booking-agent, booking-agent owns the canonical Alembic migrations — `create_all` is a no-op there, and the schema-contract test guards against model drift.
+- **Schema ownership**: in standalone mode (`STANDALONE_MODE=true`), `booking-mcp-seed` bootstraps the schema with `create_all`. When sharing a DB with booking-agent, booking-agent owns the canonical Alembic migrations — skip the seed entirely, and the schema-contract test guards against model drift.
 - No FastAPI/LangGraph — FastMCP brings its own (Starlette/uvicorn) HTTP stack for the HTTP transport.
 - **MCP client features used**: *elicitation* (write confirmation), *sampling* (`book_from_text`). Both degrade gracefully — a client that doesn't support them just can't call those tools.
 - **Not implemented (deliberately)**: per-resource *content subscriptions* (live `resources/updated` pushes) and *argument completions* aren't first-class in this FastMCP version (only `list_changed` notifications and no server-side `completion/complete` hook), so we don't hand-roll non-idiomatic plumbing for them. Clients re-read `booking://schedule/{date}` for fresh data.

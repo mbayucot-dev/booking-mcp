@@ -11,11 +11,14 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastmcp import FastMCP
+from fastmcp.server.auth import restrict_tag
+from fastmcp.server.middleware import AuthMiddleware
 from sqlalchemy import text
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from . import db, prompts, resources, tools, workflow
+from .auth import PII, READ, WORKFLOW, WRITE, HashedApiKeyVerifier, load_api_keys
 from .config import get_settings
 
 logging.basicConfig(level=get_settings().log_level.upper())
@@ -46,27 +49,31 @@ def health_status() -> tuple[dict, int]:
 
 
 def _auth():
-    """Bearer-token auth for the HTTP transport when AUTH_TOKEN is configured."""
-    token = get_settings().auth_token
-    if not token:
-        return None
-    from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
+    """Per-client API-key auth for the HTTP transport when API_KEYS or AUTH_TOKEN is set.
 
-    return StaticTokenVerifier(tokens={token: {"client_id": "booking-mcp"}})
+    Keys are SHA-256-hashed at rest and carry per-client read/write scopes; the
+    verifier never holds plaintext. Returns None (open) when neither is configured.
+    """
+    settings = get_settings()
+    if not settings.api_keys and not settings.auth_token:
+        return None
+    return HashedApiKeyVerifier(load_api_keys(settings))
+
+
+def _has_keys() -> bool:
+    """True when any HTTP credential is configured (API_KEYS or the deprecated AUTH_TOKEN)."""
+    settings = get_settings()
+    return bool(settings.api_keys or settings.auth_token)
 
 
 def _check_write_auth(*, transport: str | None, read_only: bool) -> None:
     """Refuse to start an unauthenticated, write-enabled HTTP server (write tools bypass
     booking-agent's approval workflow). stdio is client-launched, so it's exempt."""
-    if (
-        transport in ("http", "streamable-http", "sse")
-        and not read_only
-        and not get_settings().auth_token
-    ):
+    if transport in ("http", "streamable-http", "sse") and not read_only and not _has_keys():
         raise RuntimeError(
             "Refusing to start: write tools are enabled (READ_ONLY=false) over HTTP with no "
-            "AUTH_TOKEN set — that exposes write access unauthenticated. Set AUTH_TOKEN, or "
-            "run with READ_ONLY=true."
+            "API_KEYS or AUTH_TOKEN set — that exposes write access unauthenticated. Configure "
+            "API_KEYS (or AUTH_TOKEN), or run with READ_ONLY=true."
         )
 
 
@@ -82,7 +89,32 @@ def build_server(read_only: bool | None = None, *, transport: str | None = None)
             "WRITE MODE ENABLED (READ_ONLY=false): direct write tools bypass booking-agent's "
             "human-approval workflow. Use book_via_workflow for the approval-gated safe path."
         )
-    mcp = FastMCP(name="booking-mcp", instructions=INSTRUCTIONS, lifespan=_lifespan, auth=_auth())
+    auth = _auth()
+    # When keys are configured, three independent AuthMiddleware instances gate their respective
+    # tags: `write` tools need the write scope, `workflow` tools need the workflow scope, and
+    # `pii` tools/resources need the pii scope. Each middleware independently filters tools/list
+    # and blocks tools/call for its tag, so a read-scoped key is denied all three surfaces.
+    # With no keys (stdio/local, open read-only HTTP) there are no scopes to enforce.
+    middleware = (
+        [
+            # Enforce all four scopes independently. Each AuthMiddleware instance gates its tag
+            # across both list and call operations. Stacking them gives AND semantics: a key needs
+            # each specific scope to access tools/resources carrying that tag.
+            AuthMiddleware(auth=restrict_tag("read", scopes=[READ])),
+            AuthMiddleware(auth=restrict_tag("write", scopes=[WRITE])),
+            AuthMiddleware(auth=restrict_tag("workflow", scopes=[WORKFLOW])),
+            AuthMiddleware(auth=restrict_tag("pii", scopes=[PII])),
+        ]
+        if auth
+        else []
+    )
+    mcp = FastMCP(
+        name="booking-mcp",
+        instructions=INSTRUCTIONS,
+        lifespan=_lifespan,
+        auth=auth,
+        middleware=middleware,
+    )
     resources.register(mcp)
     prompts.register(mcp)
     tools.register(mcp, read_only=ro)

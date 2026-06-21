@@ -11,7 +11,16 @@ import json
 import pytest
 from starlette.testclient import TestClient
 
+from booking_mcp.auth import PII, READ, WORKFLOW, WRITE, hash_key
 from booking_mcp.server import build_server
+
+# Plaintext API keys for the scope-gating tests; only their hashes go in API_KEYS.
+READ_KEY = "bmcp_read_only_key_for_tests"
+WRITE_KEY = "bmcp_read_write_key_for_tests"
+PII_KEY = "bmcp_pii_key_for_tests"
+WORKFLOW_KEY = "bmcp_workflow_key_for_tests"
+WORKFLOW_ONLY_KEY = "bmcp_workflow_only_key_for_tests"  # no read scope
+EMPTY_SCOPE_KEY = "bmcp_empty_scope_key_for_tests"      # no scopes at all
 
 # Minimal valid MCP initialize request (streamable-http transport).
 MCP_HEADERS = {
@@ -231,8 +240,16 @@ def test_prompts_list_over_http_returns_expected_prompts(http_app):
 
 @pytest.fixture
 def http_app_write(monkeypatch, Session):
-    """Write-mode HTTP app; AUTH_TOKEN is required to pass the startup guard."""
-    monkeypatch.setenv("AUTH_TOKEN", "write-secret")
+    """Write-mode HTTP app with a full-access key (all four scopes) for the startup guard."""
+    monkeypatch.delenv("AUTH_TOKEN", raising=False)
+    keys = [
+        {
+            "hash": hash_key(WRITE_KEY),
+            "client_id": "writer",
+            "scopes": [READ, WRITE, PII, WORKFLOW],
+        }
+    ]
+    monkeypatch.setenv("API_KEYS", json.dumps(keys))
     return build_server(read_only=False, transport="http").http_app(transport="streamable-http")
 
 
@@ -252,11 +269,216 @@ def test_write_mode_over_http_exposes_write_tools(http_app_write):
         "find_next_available",
     }
     with TestClient(http_app_write) as client:
-        sid = _mcp_session(client, auth="write-secret")
-        result = _mcp_rpc(client, "tools/list", session_id=sid, auth="write-secret")
+        sid = _mcp_session(client, auth=WRITE_KEY)
+        result = _mcp_rpc(client, "tools/list", session_id=sid, auth=WRITE_KEY)
     assert result is not None, "tools/list returned no parseable response"
     names = {t["name"] for t in result["result"]["tools"]}
     missing_write = expected_write - names
     assert not missing_write, f"write tools absent in write-mode tools/list: {missing_write}"
     missing_read = expected_read - names
     assert not missing_read, f"read tools absent in write-mode tools/list: {missing_read}"
+
+
+# --- write-scope gating over real HTTP (least privilege) ---------------------
+#
+# These run against the full ASGI stack, so HTTP auth + the write-scope
+# AuthMiddleware execute exactly as in production (an in-memory Client bypasses
+# HTTP auth, so this gating can only be exercised over the HTTP transport).
+
+WRITE_TOOLS = {"create_booking", "cancel_booking", "reschedule_booking", "book_from_text"}
+
+
+@pytest.fixture
+def http_app_scoped(monkeypatch, Session):
+    """Write-mode HTTP app with two API keys: one read-only, one read+write."""
+    monkeypatch.delenv("AUTH_TOKEN", raising=False)
+    keys = [
+        {"hash": hash_key(READ_KEY), "client_id": "reader", "scopes": [READ]},
+        {"hash": hash_key(WRITE_KEY), "client_id": "writer", "scopes": [READ, WRITE]},
+    ]
+    monkeypatch.setenv("API_KEYS", json.dumps(keys))
+    return build_server(read_only=False, transport="http").http_app(transport="streamable-http")
+
+
+def test_no_key_is_unauthorized(http_app_scoped):
+    """No bearer token → 401 before any tool dispatch."""
+    with TestClient(http_app_scoped, raise_server_exceptions=False) as client:
+        r = client.post("/mcp", headers=MCP_HEADERS, json=MCP_INIT)
+    assert r.status_code == 401
+
+
+def test_read_key_is_denied_write_tools(http_app_scoped):
+    """A read-scoped key must not see write tools in tools/list, and a write tools/call
+    is rejected at the auth layer (before the tool body / elicitation runs)."""
+    with TestClient(http_app_scoped, raise_server_exceptions=False) as client:
+        sid = _mcp_session(client, auth=READ_KEY)
+        listed = _mcp_rpc(client, "tools/list", session_id=sid, auth=READ_KEY)
+        called = _mcp_rpc(
+            client,
+            "tools/call",
+            {"name": "cancel_booking", "arguments": {"appointment_id": "x"}},
+            rpc_id=5,
+            session_id=sid,
+            auth=READ_KEY,
+        )
+    names = {t["name"] for t in listed["result"]["tools"]}
+    assert names.isdisjoint(WRITE_TOOLS), f"read key saw write tools: {names & WRITE_TOOLS}"
+    # The call is rejected — either a JSON-RPC error or an isError tool result.
+    assert called is not None
+    body = json.dumps(called).lower()
+    assert "error" in called or called["result"].get("isError")
+    assert "authoriz" in body or "permission" in body or "not found" in body
+
+
+def test_write_key_is_allowed_write_tools(http_app_scoped):
+    """A read+write key sees the write tools (passes the scope filter).
+
+    We assert via tools/list rather than tools/call: the auth check passes for this key, so a
+    tools/call would reach the tool body and block on elicitation (the synchronous TestClient
+    can't answer it — see test_write_mode_over_http_exposes_write_tools). The deny path above
+    short-circuits before the body, so it's safe to call there but not here."""
+    with TestClient(http_app_scoped, raise_server_exceptions=False) as client:
+        sid = _mcp_session(client, auth=WRITE_KEY)
+        listed = _mcp_rpc(client, "tools/list", session_id=sid, auth=WRITE_KEY)
+    names = {t["name"] for t in listed["result"]["tools"]}
+    assert WRITE_TOOLS <= names, f"write key missing write tools: {WRITE_TOOLS - names}"
+
+
+# --- pii-scope gating over real HTTP -----------------------------------------
+#
+# get_client and booking://clients/{email} are tagged `pii` and must be hidden
+# from keys without the `pii` scope, regardless of read/write access.
+
+PII_TOOLS = {"get_client"}
+
+
+@pytest.fixture
+def http_app_pii_scoped(monkeypatch, Session):
+    """Read-only HTTP app with a read-only key and a read+pii key."""
+    monkeypatch.delenv("AUTH_TOKEN", raising=False)
+    keys = [
+        {"hash": hash_key(READ_KEY), "client_id": "reader", "scopes": [READ]},
+        {"hash": hash_key(PII_KEY), "client_id": "pii-reader", "scopes": [READ, PII]},
+    ]
+    monkeypatch.setenv("API_KEYS", json.dumps(keys))
+    return build_server(read_only=True).http_app(transport="streamable-http")
+
+
+def test_read_key_is_denied_pii_tools(http_app_pii_scoped):
+    """A read-scoped key must not see get_client (tagged pii) in tools/list."""
+    with TestClient(http_app_pii_scoped, raise_server_exceptions=False) as client:
+        sid = _mcp_session(client, auth=READ_KEY)
+        listed = _mcp_rpc(client, "tools/list", session_id=sid, auth=READ_KEY)
+    names = {t["name"] for t in listed["result"]["tools"]}
+    assert names.isdisjoint(PII_TOOLS), f"read key exposed pii tools: {names & PII_TOOLS}"
+
+
+def test_pii_key_can_access_pii_tools(http_app_pii_scoped):
+    """A read+pii-scoped key must see get_client in tools/list."""
+    with TestClient(http_app_pii_scoped, raise_server_exceptions=False) as client:
+        sid = _mcp_session(client, auth=PII_KEY)
+        listed = _mcp_rpc(client, "tools/list", session_id=sid, auth=PII_KEY)
+    names = {t["name"] for t in listed["result"]["tools"]}
+    assert PII_TOOLS <= names, f"pii key missing pii tools: {PII_TOOLS - names}"
+
+
+def test_read_key_is_denied_pii_resource_template(http_app_pii_scoped):
+    """A read-scoped key must not see booking://clients/{email} in resources/templates/list."""
+    with TestClient(http_app_pii_scoped, raise_server_exceptions=False) as client:
+        sid = _mcp_session(client, auth=READ_KEY)
+        result = _mcp_rpc(client, "resources/templates/list", rpc_id=3, session_id=sid, auth=READ_KEY)
+    uris = {t["uriTemplate"] for t in result["result"]["resourceTemplates"]}
+    assert "booking://clients/{email}" not in uris, "read key exposed the clients PII template"
+
+
+def test_pii_key_can_access_pii_resource_template(http_app_pii_scoped):
+    """A read+pii-scoped key must see booking://clients/{email} in resources/templates/list."""
+    with TestClient(http_app_pii_scoped, raise_server_exceptions=False) as client:
+        sid = _mcp_session(client, auth=PII_KEY)
+        result = _mcp_rpc(client, "resources/templates/list", rpc_id=3, session_id=sid, auth=PII_KEY)
+    uris = {t["uriTemplate"] for t in result["result"]["resourceTemplates"]}
+    assert "booking://clients/{email}" in uris, "pii key missing clients PII template"
+
+
+# --- workflow-scope gating over real HTTP ------------------------------------
+#
+# book_via_workflow, get_workflow_run, decide_workflow_run are tagged `workflow`.
+# A key without the workflow scope must not see or call them even when
+# BOOKING_AGENT_URL is set and the tools are registered.
+
+WORKFLOW_TOOLS = {"book_via_workflow", "get_workflow_run", "decide_workflow_run"}
+
+
+@pytest.fixture
+def http_app_workflow_scoped(monkeypatch, Session):
+    """Read-only HTTP app with BOOKING_AGENT_URL set, a read key, and a read+workflow key."""
+    monkeypatch.delenv("AUTH_TOKEN", raising=False)
+    monkeypatch.setenv("BOOKING_AGENT_URL", "http://booking-agent:8080")
+    keys = [
+        {"hash": hash_key(READ_KEY), "client_id": "reader", "scopes": [READ]},
+        {"hash": hash_key(WORKFLOW_KEY), "client_id": "workflow-user", "scopes": [READ, WORKFLOW]},
+    ]
+    monkeypatch.setenv("API_KEYS", json.dumps(keys))
+    return build_server(read_only=True).http_app(transport="streamable-http")
+
+
+def test_read_key_is_denied_workflow_tools(http_app_workflow_scoped):
+    """A read-scoped key must not see workflow tools even when BOOKING_AGENT_URL is set."""
+    with TestClient(http_app_workflow_scoped, raise_server_exceptions=False) as client:
+        sid = _mcp_session(client, auth=READ_KEY)
+        listed = _mcp_rpc(client, "tools/list", session_id=sid, auth=READ_KEY)
+    names = {t["name"] for t in listed["result"]["tools"]}
+    assert names.isdisjoint(WORKFLOW_TOOLS), f"read key exposed workflow tools: {names & WORKFLOW_TOOLS}"
+
+
+def test_workflow_key_can_access_workflow_tools(http_app_workflow_scoped):
+    """A read+workflow-scoped key must see all three workflow tools in tools/list."""
+    with TestClient(http_app_workflow_scoped, raise_server_exceptions=False) as client:
+        sid = _mcp_session(client, auth=WORKFLOW_KEY)
+        listed = _mcp_rpc(client, "tools/list", session_id=sid, auth=WORKFLOW_KEY)
+    names = {t["name"] for t in listed["result"]["tools"]}
+    assert WORKFLOW_TOOLS <= names, f"workflow key missing workflow tools: {WORKFLOW_TOOLS - names}"
+
+
+# --- read-scope enforcement: `read` is a real scope, not implicit ---------------
+#
+# Any valid key (regardless of other scopes) must NOT see read-tagged tools unless
+# it explicitly carries the `read` scope. This closes the gap where a workflow-only
+# or empty-scope key could observe ordinary read tools.
+
+_READ_TOOLS = {"search_availability", "list_staff", "daily_schedule", "find_next_available"}
+
+
+@pytest.fixture
+def http_app_read_enforced(monkeypatch, Session):
+    """App with BOOKING_AGENT_URL set and keys that deliberately lack the read scope."""
+    monkeypatch.delenv("AUTH_TOKEN", raising=False)
+    monkeypatch.setenv("BOOKING_AGENT_URL", "http://booking-agent:8080")
+    keys = [
+        # workflow scope only — no read; should still see workflow tools
+        {"hash": hash_key(WORKFLOW_ONLY_KEY), "client_id": "wf-only", "scopes": [WORKFLOW]},
+        # no scopes at all — should see nothing
+        {"hash": hash_key(EMPTY_SCOPE_KEY), "client_id": "no-scopes", "scopes": []},
+    ]
+    monkeypatch.setenv("API_KEYS", json.dumps(keys))
+    return build_server(read_only=True).http_app(transport="streamable-http")
+
+
+def test_workflow_only_key_cannot_see_read_tools(http_app_read_enforced):
+    """A workflow-only key (no read scope) must not see read-tagged tools, but must see
+    workflow tools (workflow tools are tagged only 'workflow', not 'read')."""
+    with TestClient(http_app_read_enforced, raise_server_exceptions=False) as client:
+        sid = _mcp_session(client, auth=WORKFLOW_ONLY_KEY)
+        listed = _mcp_rpc(client, "tools/list", session_id=sid, auth=WORKFLOW_ONLY_KEY)
+    names = {t["name"] for t in listed["result"]["tools"]}
+    assert names.isdisjoint(_READ_TOOLS), f"workflow-only key exposed read tools: {names & _READ_TOOLS}"
+    assert WORKFLOW_TOOLS <= names, f"workflow-only key missing workflow tools: {WORKFLOW_TOOLS - names}"
+
+
+def test_empty_scope_key_sees_no_tools(http_app_read_enforced):
+    """A key with no scopes must see no tools at all — every tool requires at least one scope."""
+    with TestClient(http_app_read_enforced, raise_server_exceptions=False) as client:
+        sid = _mcp_session(client, auth=EMPTY_SCOPE_KEY)
+        listed = _mcp_rpc(client, "tools/list", session_id=sid, auth=EMPTY_SCOPE_KEY)
+    names = {t["name"] for t in listed["result"]["tools"]}
+    assert not names, f"empty-scope key should see no tools, saw: {names}"
